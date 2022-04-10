@@ -1,0 +1,176 @@
+
+job "ubuntu-amd64-lanecloud-{{ lanecloud_provision_hostname }}" {
+  datacenters = ["exampledc1"]
+  type = "service"
+
+  meta {
+    image = "{{ lanecloud_provision_image_file }}"
+    bridge = "lc_br_public0"
+    image_size = "{{ lanecloud_provision_image_size }}"
+    cloud_init_base_url = "https://www.example.com/qemu-nocloud"
+    smp = "{{ lanecloud_provision_smp }}"
+    cloud_init = "lanecloud"
+    hostname = "{{ lanecloud_provision_hostname }}"
+    mac = "{{ lanecloud_provision_mac }}"
+    
+   
+  }
+
+   constraint {
+     attribute = "${attr.kernel.name}"
+     value     = "linux"
+   }
+
+
+
+  group "ubuntu-amd64-lanecloud-dispatch" { 
+
+    task "fetch-volume" {
+     lifecycle {
+           hook = "prestart"
+           sidecar = false
+         }
+
+      driver = "docker"
+
+      config {
+        image = "debian"
+        force_pull = false
+        args = [ "/bin/bash", "${NOMAD_TASK_DIR}/entrypoint.sh" ]
+
+       mount {
+           type = "bind"
+           target = "/archive"
+           source = "/mnt/storage/archive"
+           readonly = false
+           bind_options {
+                 propagation = "rshared"
+               }
+         }
+      }
+      resources {
+        cpu    = 500
+        memory = 300
+      }
+
+      template {
+        data = <<EOH
+      mkdir -p ${NOMAD_ALLOC_DIR}/image/
+      cp -v /archive/images/${NOMAD_META_IMAGE} ${NOMAD_ALLOC_DIR}/image/${NOMAD_META_IMAGE}
+      EOH
+      
+        destination = "local/entrypoint.sh"
+        env         = false
+       
+      }
+    }
+    task "provision" {
+     lifecycle {
+           hook = "prestart"
+           sidecar = false
+         }
+
+      driver = "docker"
+
+      config {
+        image = "debian"
+        force_pull = false
+        args = [ "/bin/bash", "${NOMAD_TASK_DIR}/entrypoint.sh" ]
+
+      }
+
+      resources {
+        cpu    = 500
+        memory = 300
+      }
+
+      template {
+        data = <<EOH
+      apt update -y
+      apt install -y qemu-utils genisoimage
+      mkdir -p ${NOMAD_ALLOC_DIR}/image
+      echo "creating null image hack"
+      qemu-img create -f qcow2 ${NOMAD_ALLOC_DIR}/image/null.img 1M 
+      echo "resizing image to ${NOMAD_META_image_size}"
+      qemu-img resize ${NOMAD_ALLOC_DIR}/image/${NOMAD_META_IMAGE} ${NOMAD_META_image_size}
+      echo "#include" > local/user-data
+      echo "${NOMAD_META_CLOUD_INIT_BASE_URL}/${NOMAD_META_CLOUD_INIT}/user-data" >> local/user-data
+      cd local
+      echo "create cidata iso"
+      echo "dir is $(pwd)"
+      genisoimage  -output ${NOMAD_ALLOC_DIR}/image/seed.iso -volid cidata -joliet -rock user-data meta-data network-config
+      echo "meta-data"
+      cat meta-data
+      echo "user-data"
+      cat user-data
+      EOH
+      
+        destination = "local/entrypoint.sh"
+        env         = false
+       
+      }
+      template {
+        data = <<EOH
+instance-id: {{ '{{ env "NOMAD_ALLOC_ID" }}' }}
+local-hostname: {{ lanecloud_provision_hostname }}.{{ lanecloud_provision_domain }}
+dsmode: net
+      EOH
+      
+        destination = "local/meta-data"
+        env         = false
+       
+      }
+      template {
+        data = <<EOH
+version: 1
+config:
+  - type: physical
+    name: ens4
+#    mac_address: "{{ lanecloud_provision_mac}}"
+    subnets:
+       - type: static
+         address: {{ lanecloud_provision_address }}
+         gateway: {{ lanecloud_provision_gateway }}
+         dns_nameservers:
+           - {{ lanecloud_provision_dns1 }}
+           - {{ lanecloud_provision_dns2 }}
+         dns_search:
+           - {{ lanecloud_provision_domain }}
+    EOH
+    
+        destination = "local/network-config"
+        env         = false
+       
+      }
+
+    }
+
+    task "ubuntu-lanecloud-instance" {
+      driver = "qemu"
+      service {
+        name = "lanecloud-instance-{{ lanecloud_provision_hostname }}"
+        tags = ["ubuntu", "lanecloud", "dispatch"]
+
+        meta {
+          fqdn = "{{ lanecloud_provision_hostname }}.{{ lanecloud_provision_domain }}"
+        }
+      }
+
+      config {
+        accelerator = "kvm"
+        image_path = "../alloc/image/null.img"
+        graceful_shutdown = true
+        args = ["-smp", "{{ lanecloud_provision_smp }}", "-drive", "file=../alloc/image/${NOMAD_META_IMAGE},id=drive0,if=none", "-device", "virtio-blk-pci,drive=drive0,bootindex=0", "-cdrom", "../alloc/image/seed.iso", "-netdev", "bridge,br=${NOMAD_META_BRIDGE},id=n${NOMAD_ALLOC_ID}", "-device", "virtio-net,netdev=n${NOMAD_ALLOC_ID},mac={{ lanecloud_provision_mac }}"]
+      }
+
+
+
+       resources {
+         memory = {{ lanecloud_provision_memory }}
+         cpu = {{ (lanecloud_provision_smp | int ) * lanecloud_provision_cpu_mhz | int }}
+       }
+
+
+    } # end task
+  } #end group
+}

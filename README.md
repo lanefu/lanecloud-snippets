@@ -16,3 +16,7 @@ a mess of nomad qemu netbox and more
 #### paraam payload
 
 mac address, systemname etc
+
+## ansible
+
+example playbook and template of dynamic dispatch of nomad job for qemu provisioning

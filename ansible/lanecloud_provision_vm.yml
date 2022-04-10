@@ -1,0 +1,102 @@
+---
+- hosts: localhost
+  connection: local
+  gather_facts: no
+  
+  module_defaults:
+    netbox_ip_address:
+      netbox_url: https://example.com/netbox/
+      netbox_token: 
+    community.general.nomad_job:
+      host: nomad.example.com
+      use_ssl: false
+  
+  vars_prompt:
+    - name: lanecloud_provision_hostname
+      prompt: "hostname: "
+      default: "testvm1"
+      private: no
+    - name: lanecloud_provision_image_file
+      prompt: "image file ['armbian-rpardini-impish.img', 'hirsute-server-cloudimg-amd64.img','jammy-server-cloudimg-amd64.img']"
+      default: "ubuntu-21.04-server-cloudimg-amd64.img"
+      private: no
+    - name: lanecloud_provision_image_size
+      prompt: "Desired Disk Image Size: "
+      default: "40G"
+      private: no
+    - name: lanecloud_provision_smp
+      prompt: "cpu count: "
+      default: "4"
+      private: no
+    - name: lanecloud_provision_memory
+      prompt: "memory in MB: "
+      default: "4000"
+      private: no
+
+
+  vars:
+    lanecloud_provision_domain: alpha.example.com
+    lanecloud_provision_prefix: 10.0.0.0/26
+    lanecloud_provision_gateway: 10.0.0.1
+    lanecloud_provision_mac: "{{ '52:58:00' | community.general.random_mac(seed=lanecloud_provision_hostname) }}"
+    lanecloud_provision_dns1: 1.1.1.1
+    lanecloud_provision_dns2: 8.8.8.8
+    lanecloud_provision_cpu_mhz: 500
+    show_debug: false
+
+
+
+  tasks:
+    - name: request IP
+      netbox_ip_address:
+        data:
+          prefix: "{{ lanecloud_provision_prefix }}"
+          dns_name: "{{ lanecloud_provision_hostname }}.{{ lanecloud_provision_domain }}"
+        state: new
+      register: lanecloud_request_ip
+  
+    - name: debug
+      debug:
+        var: lanecloud_request_ip
+      when: show_debug
+
+    - name: Save Assigned IP
+      set_fact:
+        lanecloud_provision_address: "{{ lanecloud_request_ip.ip_address.address }}"
+
+    - name: create publc dns
+      lanefu.infra.lexicon:
+        config_file: lexicon.yml
+        provider: someprovider
+        domain: example.com
+        type: A
+        name: "{{ lanecloud_provision_hostname }}.alpha"
+        content: "{{ lanecloud_provision_address | ipaddr('address') }}"
+        action: create
+        ttl: 600
+      register: lexicon_result
+
+    - name: lexicon output
+      debug:
+        var: lexicon_result
+      when: show_debug
+
+    - name: "Dispatch VM {{ lanecloud_provision_hostname }}"
+      community.general.nomad_job:
+        content: "{{ lookup('ansible.builtin.template', 'lanecloud_vm.nomad.j2') }}"
+        state: present
+      register: nomad_dispatch
+
+    - name: debug Dispatch
+      debug:
+        var: nomad_dispatch
+      when: show_debug
+
+    - name: wait for online
+      wait_for:
+        host: "{{ lanecloud_provision_address | ipaddr('address') }}"
+        port: 22
+        state: started
+
+    - debug:
+        msg: "Host online! {{ lanecloud_provision_address | ipaddr('address') }}"
